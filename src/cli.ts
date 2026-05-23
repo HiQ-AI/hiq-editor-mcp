@@ -1,23 +1,26 @@
 #!/usr/bin/env node
 /**
- * Subprocess-friendly CLI. What `npx -y @hiq-ai/hiq-editor <subcommand>` runs.
+ * Subprocess-friendly CLI for the editor MCP gateway. What
+ * `npx -y @hiq-ai/hiq-editor <subcommand>` runs.
  *
- * Every tool from {@link allTools} is exposed as a subcommand (snake_case →
- * kebab-case), so the same operations the MCP server offers are scriptable from
- * a shell. Outputs the tool's text result on stdout. One extra subcommand:
- *   - `version` — print version.
+ * Generic, gateway-style — it does not declare per-tool subcommands. Instead:
+ *   - `list`              — list the tools the gateway exposes (remote + local).
+ *   - `call <tool> --args '<json>'` — invoke any tool by name with a JSON args object.
+ *   - `version`           — print version.
  *
  * Auth comes from HIQ_EDITOR_TOKEN in the env, exactly like the MCP server.
  */
-import { z } from "zod";
 import yargs from "yargs";
-import type { Options, Argv, ArgumentsCamelCase } from "yargs";
+import type { ArgumentsCamelCase } from "yargs";
 import { hideBin } from "yargs/helpers";
 
-import { allTools } from "./tools/index.js";
-import { EditorClientError, type ToolDef } from "./types.js";
+import { localToolDefs } from "./tools/index.js";
+import { listRemoteTools, callRemoteTool } from "./serverClient.js";
+import { EditorClientError } from "./types.js";
 
 const VERSION = "0.1.0";
+
+const localByName = new Map(localToolDefs.map((t) => [t.name, t]));
 
 function exitCodeFor(err: unknown): number {
   if (err instanceof EditorClientError) {
@@ -42,125 +45,107 @@ function emitError(err: unknown): void {
   process.exit(code);
 }
 
-function snakeToKebab(s: string): string {
-  return s.replace(/_/g, "-");
+/** Flatten a tool result's content blocks to plain text. */
+function contentToText(result: unknown): string {
+  const raw =
+    result && typeof result === "object" ? (result as { content?: unknown }).content : undefined;
+  const content = Array.isArray(raw) ? raw : [];
+  return content
+    .map((c) =>
+      c && typeof c === "object" && "text" in c
+        ? String((c as { text: unknown }).text)
+        : "",
+    )
+    .filter(Boolean)
+    .join("\n");
 }
 
-/** Unwrap optional/default/nullable wrappers down to the inner Zod type. */
-function unwrap(t: z.ZodTypeAny): { inner: z.ZodTypeAny; required: boolean } {
-  let cur = t;
-  let required = true;
-  // ZodOptional / ZodDefault / ZodNullable expose .unwrap() / ._def.innerType.
-  // Loop until we hit a concrete type.
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const name = (cur as { _def?: { typeName?: string } })._def?.typeName;
-    if (name === "ZodOptional" || name === "ZodNullable") {
-      required = name === "ZodNullable" ? required : false;
-      cur = (cur as unknown as { unwrap: () => z.ZodTypeAny }).unwrap();
-    } else if (name === "ZodDefault") {
-      required = false;
-      cur = (cur as unknown as { _def: { innerType: z.ZodTypeAny } })._def.innerType;
-    } else {
-      break;
-    }
+async function runList(): Promise<void> {
+  const lines: string[] = [];
+  let remote: Awaited<ReturnType<typeof listRemoteTools>> = [];
+  try {
+    remote = await listRemoteTools();
+  } catch (err) {
+    process.stderr.write(`(remote tools unavailable: ${err instanceof Error ? err.message : String(err)})\n`);
   }
-  return { inner: cur, required };
-}
-
-/** Derive a yargs option spec for one Zod field of a tool's raw shape. */
-function fieldToOption(field: z.ZodTypeAny): { opt: Options; isJson: boolean } {
-  const { inner, required } = unwrap(field);
-  const typeName = (inner as { _def?: { typeName?: string } })._def?.typeName;
-  const description = (field as { description?: string }).description ?? "";
-
-  const opt: Options = { description };
-  if (required) opt.demandOption = true;
-
-  let isJson = false;
-  if (typeName === "ZodString") {
-    opt.type = "string";
-  } else if (typeName === "ZodNumber") {
-    opt.type = "number";
-  } else if (typeName === "ZodBoolean") {
-    opt.type = "boolean";
-  } else if (typeName === "ZodArray" || typeName === "ZodObject") {
-    opt.type = "string";
-    opt.description = (description ? description + " " : "") + "(JSON-encoded)";
-    isJson = true;
-  } else {
-    opt.type = "string";
+  for (const t of remote) {
+    lines.push(`${t.name}\t${t.description ?? ""}`);
   }
-  return { opt, isJson };
+  for (const t of localToolDefs) {
+    lines.push(`${t.name}\t(local) ${t.description}`);
+  }
+  process.stdout.write(lines.join("\n") + "\n");
 }
 
-function buildToolCommand(tool: ToolDef) {
-  const shape = tool.schema;
-  const fieldNames = Object.keys(shape);
-  const jsonFields = new Set<string>();
+async function runCall(tool: string, argsJson: string): Promise<void> {
+  let args: Record<string, unknown>;
+  try {
+    args = argsJson ? (JSON.parse(argsJson) as Record<string, unknown>) : {};
+  } catch (e) {
+    throw new EditorClientError("validation", `--args must be valid JSON: ${String(e)}`);
+  }
 
-  return {
-    command: snakeToKebab(tool.name),
-    describe: tool.description.slice(0, 90),
-    builder: (y: Argv) => {
-      let out = y;
-      for (const name of fieldNames) {
-        const { opt, isJson } = fieldToOption(shape[name]);
-        if (isJson) jsonFields.add(name);
-        out = out.option(snakeToKebab(name), opt);
-      }
-      return out;
-    },
-    handler: async (argv: ArgumentsCamelCase<Record<string, unknown>>) => {
-      try {
-        const args: Record<string, unknown> = {};
-        for (const name of fieldNames) {
-          const kebab = snakeToKebab(name);
-          const v = argv[name] ?? argv[kebab];
-          if (v === undefined) continue;
-          if (jsonFields.has(name) && typeof v === "string") {
-            try {
-              args[name] = JSON.parse(v);
-            } catch (e) {
-              throw new EditorClientError("validation", `--${kebab} must be valid JSON: ${String(e)}`);
-            }
-          } else {
-            args[name] = v;
-          }
-        }
-        // Validate through the schema so server-side validation isn't the first gate.
-        const parsed = z.object(shape).parse(args) as Record<string, unknown>;
-        const text = await tool.handler(parsed);
-        process.stdout.write(text + "\n");
-      } catch (err) {
-        emitError(err);
-      }
-    },
-  };
+  const local = localByName.get(tool);
+  if (local) {
+    const content = await local.handler(args);
+    process.stdout.write(contentToText({ content }) + "\n");
+    return;
+  }
+
+  const result = await callRemoteTool(tool, args);
+  if ((result as { isError?: boolean }).isError) {
+    throw new EditorClientError("upstream", contentToText(result));
+  }
+  process.stdout.write(contentToText(result) + "\n");
 }
 
 async function main(): Promise<void> {
-  let y = yargs(hideBin(process.argv))
+  await yargs(hideBin(process.argv))
     .scriptName("hiq-editor")
     .strict()
     .help()
     .alias("h", "help")
-    .demandCommand(1, "");
-
-  for (const tool of allTools) {
-    y = y.command(buildToolCommand(tool));
-  }
-
-  y = y.command(
-    "version",
-    "Print version.",
-    (yy) => yy,
-    () => {
-      process.stdout.write(VERSION + "\n");
-    },
-  );
-
-  await y.parseAsync();
+    .demandCommand(1, "")
+    .command(
+      "list",
+      "List the tools the gateway exposes (remote + local).",
+      (y) => y,
+      async () => {
+        try {
+          await runList();
+        } catch (err) {
+          emitError(err);
+        }
+      },
+    )
+    .command(
+      "call <tool>",
+      "Invoke a tool by name with a JSON args object.",
+      (y) =>
+        y
+          .positional("tool", { type: "string", describe: "Tool name." })
+          .option("args", {
+            type: "string",
+            describe: "JSON-encoded args object, e.g. '{\"datasource\":\"GBA\"}'.",
+            default: "{}",
+          }),
+      async (argv: ArgumentsCamelCase<{ tool?: string; args?: string }>) => {
+        try {
+          await runCall(String(argv.tool ?? ""), String(argv.args ?? "{}"));
+        } catch (err) {
+          emitError(err);
+        }
+      },
+    )
+    .command(
+      "version",
+      "Print version.",
+      (y) => y,
+      () => {
+        process.stdout.write(VERSION + "\n");
+      },
+    )
+    .parseAsync();
 }
 
 main().catch((err) => emitError(err));

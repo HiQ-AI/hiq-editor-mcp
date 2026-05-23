@@ -1,15 +1,12 @@
 /**
- * The full tool surface: 16 forwarders (business operations proxied to the
- * editor server) + the local-only tools (UPR-template parsing, process export).
- *
- * Both entry points — the stdio MCP server (server.ts) and the CLI (cli.ts) —
- * iterate {@link allTools}.
+ * The local-only tool defs (UPR-template parsing, process export). The 16
+ * business tools are no longer declared here — they are re-exposed dynamically
+ * by the gateway, which pulls them straight from the remote MCP endpoint's
+ * tools/list (no schema duplication).
  */
 
-import type { ToolDef } from "../types.js";
-import { forwarders } from "./forwarders.js";
-import { localTools } from "./local.js";
+import { localTools, type LocalToolDef } from "./local.js";
 
-export const allTools: ToolDef[] = [...forwarders, ...localTools];
+export const localToolDefs: LocalToolDef[] = localTools;
 
-export type { ToolDef };
+export type { LocalToolDef };

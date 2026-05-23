@@ -2,7 +2,8 @@
  * Runtime config. Read once at process start from the environment the host
  * (Cortex Desktop / Claude Code) supplies when it spawns this stdio MCP.
  *
- *   HIQ_EDITOR_SERVER_URL  — the editor server's HTTP API base, no trailing slash.
+ *   HIQ_EDITOR_SERVER_URL  — the editor server's Streamable-HTTP MCP endpoint
+ *                            (e.g. https://x.hiqlcd.com/mcp/editor), no trailing slash.
  *   HIQ_EDITOR_TOKEN       — the caller's SSO token (raw SSO accessToken or a
  *                            Cortex desktop JWT wrapping one). Forwarded verbatim
  *                            as `Authorization: Bearer <token>`; the server
@@ -11,17 +12,16 @@
  *                            no `login` tool in this client.
  */
 
-// The editor server is reached through the existing APISIX edge at x.hiqlcd.com
-// (same host the previous remote MCP used). The final sub-path is set by the
-// APISIX route when the TS server deploys; override via HIQ_EDITOR_SERVER_URL.
-const DEFAULT_SERVER_URL = "https://x.hiqlcd.com/editor-mcp";
+// The editor server's MCP endpoint is reached through the existing APISIX edge
+// at x.hiqlcd.com. Override via HIQ_EDITOR_SERVER_URL.
+const DEFAULT_SERVER_URL = "https://x.hiqlcd.com/mcp/editor";
 
 function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
 export interface Config {
-  /** Editor server HTTP API base URL, no trailing slash. */
+  /** Editor server MCP endpoint URL, no trailing slash. */
   serverUrl: string;
   /** Caller's SSO token, forwarded as a Bearer token. Empty string if unset. */
   token: string;

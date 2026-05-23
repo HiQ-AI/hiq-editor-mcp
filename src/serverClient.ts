@@ -1,83 +1,84 @@
 /**
- * HTTP client for the closed editor server. Every business operation forwards
- * here: `POST /tools/:name` with a JSON args body and a Bearer SSO token,
- * returning the `{ ok, data }` / `{ ok, error }` envelope.
+ * MCP client for the closed editor server. This package is a gateway: it
+ * connects to the server's Streamable-HTTP MCP endpoint (config.serverUrl,
+ * e.g. https://x.hiqlcd.com/mcp/editor) as an MCP client and re-exposes the
+ * server's tools over stdio. No schema duplication — tools/list and the
+ * tool inputSchemas come straight from the server.
  *
- * Calc/SQL on the server side can be slow, so the timeout is generous (120 s).
+ * The connection is a lazily-built singleton (connect once, reuse). Calc/SQL
+ * on the server side can be slow, so the per-request timeout is generous (120s).
  */
 
-import { config } from "./config.js";
-import { EditorClientError, type ToolEnvelope } from "./types.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
+import { config } from "./config.js";
+import { EditorClientError } from "./types.js";
+
+const VERSION = "0.1.0";
 const REQUEST_TIMEOUT_MS = 120_000;
 
-function authHeader(): Record<string, string> {
+let clientPromise: Promise<Client> | undefined;
+
+/** Connect to the remote MCP endpoint once and reuse the client. */
+export function getRemoteClient(): Promise<Client> {
   if (!config.token) {
-    throw new EditorClientError(
-      "config",
-      "No SSO token. Set HIQ_EDITOR_TOKEN in the environment the host spawns this MCP with.",
+    return Promise.reject(
+      new EditorClientError(
+        "config",
+        "No SSO token. Set HIQ_EDITOR_TOKEN in the environment the host spawns this MCP with.",
+      ),
     );
   }
-  return { Authorization: `Bearer ${config.token}` };
+  if (!clientPromise) {
+    clientPromise = connect().catch((err) => {
+      // Reset so a later call can retry instead of caching a rejected promise.
+      clientPromise = undefined;
+      throw err;
+    });
+  }
+  return clientPromise;
 }
 
-async function request<T>(
-  method: "GET" | "POST",
-  path: string,
-  body?: Record<string, unknown>,
-): Promise<T> {
-  const url = `${config.serverUrl}${path}`;
-  let res: Response;
+async function connect(): Promise<Client> {
+  const client = new Client(
+    { name: "hiq-editor-gateway", version: VERSION },
+    { capabilities: {} },
+  );
+  const transport = new StreamableHTTPClientTransport(new URL(config.serverUrl), {
+    requestInit: {
+      headers: { Authorization: `Bearer ${config.token}` },
+    },
+  });
   try {
-    res = await fetch(url, {
-      method,
-      headers: {
-        ...authHeader(),
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    await client.connect(transport);
   } catch (err) {
-    const msg =
-      err instanceof Error && err.name === "TimeoutError"
-        ? `request to ${path} timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-    throw new EditorClientError("transport", `${method} ${url} failed: ${msg}`);
-  }
-
-  let envelope: ToolEnvelope<T>;
-  try {
-    envelope = (await res.json()) as ToolEnvelope<T>;
-  } catch {
+    const msg = err instanceof Error ? err.message : String(err);
     throw new EditorClientError(
       "transport",
-      `${method} ${url} returned HTTP ${res.status} with a non-JSON body`,
+      `could not connect to editor MCP endpoint ${config.serverUrl}: ${msg}`,
     );
   }
-
-  if (envelope.ok) return envelope.data;
-
-  throw new EditorClientError(
-    "upstream",
-    envelope.error?.message ?? `server returned HTTP ${res.status}`,
-    envelope.error?.code,
-  );
+  return client;
 }
 
-/** Invoke a business tool on the server. Returns the formatted text it produced. */
-export function callTool(
+/** The remote server's tool catalog (name, description, inputSchema). */
+export async function listRemoteTools(): Promise<Tool[]> {
+  const client = await getRemoteClient();
+  const { tools } = await client.listTools(undefined, { timeout: REQUEST_TIMEOUT_MS });
+  return tools;
+}
+
+/** Invoke a tool on the remote server, passing through its result content. */
+export async function callRemoteTool(
   name: string,
   args: Record<string, unknown>,
-): Promise<string> {
-  return request<string>("POST", `/tools/${encodeURIComponent(name)}`, args);
-}
-
-/** Fetch the server's tool catalog. */
-export function listTools(): Promise<
-  { name: string; description: string; readOnly: boolean }[]
-> {
-  return request("GET", "/tools");
+): Promise<Awaited<ReturnType<Client["callTool"]>>> {
+  const client = await getRemoteClient();
+  return client.callTool(
+    { name, arguments: args },
+    undefined,
+    { timeout: REQUEST_TIMEOUT_MS },
+  );
 }

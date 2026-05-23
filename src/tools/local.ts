@@ -1,19 +1,43 @@
 /**
- * Local-only tools — the reason this open client exists alongside the closed
- * server. These run on the local filesystem instead of forwarding:
+ * Local-only tools — the reason this gateway exists alongside the remote MCP
+ * endpoint. These run on the local filesystem instead of forwarding:
  *
  *   parse_upr_template — read a local UPR .xlsx and surface its 基本信息 fields +
  *                        data-item rows so the agent can drive create_process_tool
  *                        + add_exchange_tool.
  *   export_process     — fetch a process's detail from the server and write it to
  *                        a local file.
+ *
+ * Each tool is declared with an explicit JSON Schema inputSchema (NOT zod): the
+ * low-level MCP Server returns raw inputSchema in tools/list, and the remote
+ * tools are already JSON-schema, so the two local tools match that shape.
  */
 
-import { z } from "zod";
 import * as XLSX from "xlsx";
-import type { ToolDef } from "../types.js";
-import { callTool } from "../serverClient.js";
+import { callRemoteTool } from "../serverClient.js";
 import { readBytes, writeText, requireAbsolute } from "../files.js";
+
+/** A JSON-Schema object describing a tool's arguments. */
+export interface JsonSchema {
+  type: "object";
+  properties: Record<string, unknown>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
+/** MCP content block returned by a tool. */
+export interface ContentBlock {
+  type: "text";
+  text: string;
+}
+
+/** One local tool's definition: name + description + JSON-schema + handler. */
+export interface LocalToolDef {
+  name: string;
+  description: string;
+  inputSchema: JsonSchema;
+  handler: (args: Record<string, unknown>) => Promise<ContentBlock[]>;
+}
 
 const BASIC_INFO_SHEET = "基本信息";
 /** Sheet names that hold a header-row + data-item-rows table. */
@@ -81,7 +105,22 @@ function parseDataItems(wb: XLSX.WorkBook, name: string): {
   return { sheet: name, headers, rows };
 }
 
-export const parseUprTemplate: ToolDef = {
+/** Flatten a remote callTool result's content to a text string. */
+function contentToText(result: unknown): string {
+  const raw =
+    result && typeof result === "object" ? (result as { content?: unknown }).content : undefined;
+  const content = Array.isArray(raw) ? raw : [];
+  return content
+    .map((c) =>
+      c && typeof c === "object" && "text" in c
+        ? String((c as { text: unknown }).text)
+        : "",
+    )
+    .filter(Boolean)
+    .join("\n");
+}
+
+export const parseUprTemplate: LocalToolDef = {
   name: "parse_upr_template",
   description:
     "LOCAL. Read a local UPR (unit process) .xlsx template and extract its 基本信息 " +
@@ -89,12 +128,17 @@ export const parseUprTemplate: ToolDef = {
     "Returns the basic-info key/values (with required flags) and, for each data-item " +
     "sheet, the column headers + non-empty rows verbatim — map the columns to tool args " +
     "yourself (背景数据唯一ID → search_backgrounds_tool, etc.). file_path must be absolute.",
-  schema: {
-    file_path: z
-      .string()
-      .describe("Absolute path to the local UPR .xlsx template."),
+  inputSchema: {
+    type: "object",
+    properties: {
+      file_path: {
+        type: "string",
+        description: "Absolute path to the local UPR .xlsx template.",
+      },
+    },
+    required: ["file_path"],
+    additionalProperties: false,
   },
-  readOnly: true,
   handler: async (args) => {
     const filePath = requireAbsolute("file_path", String(args.file_path ?? ""));
     const bytes = await readBytes(filePath);
@@ -111,28 +155,43 @@ export const parseUprTemplate: ToolDef = {
       basic_info: basicInfo,
       data_items: dataItemSheets,
     };
-    return JSON.stringify(summary, null, 2);
+    return [{ type: "text", text: JSON.stringify(summary, null, 2) }];
   },
 };
 
-export const exportProcess: ToolDef = {
+export const exportProcess: LocalToolDef = {
   name: "export_process",
   description:
     "LOCAL. Fetch a process's full detail from the server (get_process_detail_tool) " +
     "and write it to a local file. Use to archive or hand off a dataset. out_path must " +
     "be absolute.",
-  schema: {
-    process_id: z.string().describe("Process ID to export."),
-    out_path: z.string().describe("Absolute path of the local file to write."),
+  inputSchema: {
+    type: "object",
+    properties: {
+      process_id: { type: "string", description: "Process ID to export." },
+      out_path: {
+        type: "string",
+        description: "Absolute path of the local file to write.",
+      },
+    },
+    required: ["process_id", "out_path"],
+    additionalProperties: false,
   },
-  readOnly: false,
   handler: async (args) => {
     const processId = String(args.process_id ?? "");
     const outPath = requireAbsolute("out_path", String(args.out_path ?? ""));
-    const detail = await callTool("get_process_detail_tool", { process_id: processId });
+    const result = await callRemoteTool("get_process_detail_tool", {
+      process_id: processId,
+    });
+    const detail = contentToText(result);
     await writeText(outPath, detail);
-    return `Wrote process ${processId} detail (${detail.length} chars) to ${outPath}`;
+    return [
+      {
+        type: "text",
+        text: `Wrote process ${processId} detail (${detail.length} chars) to ${outPath}`,
+      },
+    ];
   },
 };
 
-export const localTools: ToolDef[] = [parseUprTemplate, exportProcess];
+export const localTools: LocalToolDef[] = [parseUprTemplate, exportProcess];

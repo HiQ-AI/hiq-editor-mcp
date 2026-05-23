@@ -1,30 +1,35 @@
 # @hiq-ai/hiq-editor-mcp
 
-Open local stdio [MCP](https://modelcontextprotocol.io) client for the **HiQ LCA
-dataset editor**. It runs on the host machine (Cortex Desktop / Claude Code
-spawns it over stdio), forwards LCA business operations to the editor server's
-HTTP API, and adds **local file capabilities** — parsing UPR `.xlsx` templates
+Open local stdio [MCP](https://modelcontextprotocol.io) **gateway** for the
+**HiQ LCA dataset editor**. It runs on the host machine (Cortex Desktop / Claude
+Code spawns it over stdio), connects to the editor server's MCP endpoint
+(Streamable HTTP) as an MCP client, **dynamically re-exposes the server's tools**
+over stdio, and adds **local file capabilities** — parsing UPR `.xlsx` templates
 and exporting process detail to disk — that a remote server cannot do.
 
 Apache-2.0. The proprietary parts (database schema, SQL, write/business logic,
-SSO internals) live in a separate closed server; this client only knows the
-server's HTTP API contract.
+SSO internals) live in a separate closed server; this gateway only knows the
+server's MCP endpoint URL and forwards the caller's SSO token to it.
 
 ## Architecture
 
 ```
 ┌──────────────────────────────────────┐  HTTPS   ┌────────────────────────────┐
 │  @hiq-ai/hiq-editor-mcp  (this, open) │  + SSO   │  editor server  (closed)   │
-│  • stdio MCP server                   │ ───────> │  • POST /tools/:name       │
-│  • 16 business tools → forward        │  token   │  • GET  /tools             │
+│  • stdio MCP server (gateway)         │ ───────> │  • /mcp/editor             │
+│  • re-exposes remote tools 1:1        │  token   │    (Streamable HTTP MCP)   │
 │  • LOCAL: parse_upr_template,         │ <─────── │  • SQL reads + writes + SSO│
 │           export_process              │  result  │                            │
 └──────────────────────────────────────┘          └────────────────────────────┘
 ```
 
-Each business tool POSTs validated args to `POST /tools/:name` with the caller's
-SSO token and returns the text the server produced. The two local tools read and
-write the local filesystem instead of forwarding.
+The gateway connects to the server's single `/mcp/editor` Streamable-HTTP
+endpoint as an MCP client (Bearer SSO token). On `tools/list` it returns the
+remote server's tools verbatim (names, descriptions, and JSON schemas straight
+from the server — no duplication) plus the 2 local tools. On `tools/call` it
+runs the 2 local tools locally and passes every other call through to the remote
+endpoint, relaying the result content. This eliminates schema duplication and
+reuses the server's existing MCP endpoint.
 
 ## Install / run
 
@@ -46,15 +51,15 @@ Add it to your MCP host's `mcpServers` config (Claude Code, Cortex Desktop, etc.
       "args": ["-y", "@hiq-ai/hiq-editor-mcp"],
       "env": {
         "HIQ_EDITOR_TOKEN": "<your SSO token>",
-        "HIQ_EDITOR_SERVER_URL": "https://editor.hiqlcd.com/api/editor-mcp"
+        "HIQ_EDITOR_SERVER_URL": "https://x.hiqlcd.com/mcp/editor"
       }
     }
   }
 }
 ```
 
-`HIQ_EDITOR_SERVER_URL` is optional and defaults to
-`https://editor.hiqlcd.com/api/editor-mcp`.
+`HIQ_EDITOR_SERVER_URL` is the editor server's Streamable-HTTP MCP endpoint. It
+is optional and defaults to `https://x.hiqlcd.com/mcp/editor`.
 
 ## Authentication
 
@@ -65,7 +70,10 @@ user and tenant from it. The token is never written to disk or logs.
 
 ## Tool surface
 
-### Business tools (forwarded to the editor server)
+### Business tools (re-exposed from the editor server)
+
+These come straight from the server's MCP endpoint — the gateway returns them
+verbatim, so the live list is whatever the server publishes. At time of writing:
 
 Reads:
 
@@ -104,17 +112,23 @@ Both local tools require **absolute** file paths.
 
 ## CLI
 
-The same tools are scriptable from a shell (snake_case → kebab-case):
+A generic gateway CLI makes the same tools scriptable from a shell:
 
 ```bash
 export HIQ_EDITOR_TOKEN=<your SSO token>
-npx @hiq-ai/hiq-editor list-datasources
-npx @hiq-ai/hiq-editor get-process-detail-tool --process-id 12345
-npx @hiq-ai/hiq-editor parse-upr-template --file-path /abs/path/UPR.xlsx
+
+# List the tools the gateway exposes (remote + local).
+npx @hiq-ai/hiq-editor list
+
+# Invoke any tool by name, passing args as a JSON object.
+npx @hiq-ai/hiq-editor call list_datasources
+npx @hiq-ai/hiq-editor call get_process_detail_tool --args '{"process_id":"12345"}'
+npx @hiq-ai/hiq-editor call parse_upr_template --args '{"file_path":"/abs/path/UPR.xlsx"}'
+
 npx @hiq-ai/hiq-editor version
 ```
 
-Array / object args are passed as JSON-encoded strings.
+`--args` defaults to `{}`. Tool names are the server's native (snake_case) names.
 
 ## Development
 
