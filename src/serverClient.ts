@@ -41,14 +41,37 @@ export function getRemoteClient(): Promise<Client> {
   return clientPromise;
 }
 
+/** Pull the wrapped SSO accessToken out of a Cortex JWT (the `sso_token` claim)
+ *  for the edge's `accessToken` cookie. Returns the token unchanged if it isn't
+ *  a JWT. Signature is not verified — the edge does that. */
+function ssoAccessToken(token: string): string {
+  if (!token.startsWith("eyJ")) return token;
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return token;
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf-8"));
+    return typeof claims.sso_token === "string" ? claims.sso_token : token;
+  } catch {
+    return token;
+  }
+}
+
 async function connect(): Promise<Client> {
   const client = new Client(
     { name: "hiq-editor-gateway", version: VERSION },
     { capabilities: {} },
   );
+  // The APISIX edge routes auth by X-Site: 101 = JWT auth (validates our Bearer
+  // token); the default host maps to 000 = apikey auth, which rejects us with
+  // "api key不存在". Send X-Site:101 + the accessToken cookie, matching what
+  // Cortex Desktop's cortex-jwt connector sends, so the JWT path is taken.
   const transport = new StreamableHTTPClientTransport(new URL(config.serverUrl), {
     requestInit: {
-      headers: { Authorization: `Bearer ${config.token}` },
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        "X-Site": config.site,
+        Cookie: `accessToken=${ssoAccessToken(config.token)}`,
+      },
     },
   });
   try {
