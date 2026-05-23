@@ -25,9 +25,8 @@ export interface Config {
   serverUrl: string;
   /** Caller's SSO token, forwarded as a Bearer token. Empty string if unset. */
   token: string;
-  /** APISIX X-Site value. The editor edge uses site 101 = JWT auth (validates
-   *  our Bearer token); sites 000/999 = apikey auth. The default host
-   *  (x.hiqlcd.com) maps to 000, so we MUST send 101 to get JWT auth. */
+  /** Internal edge-routing value (X-Site header) that selects the JWT-auth path
+   *  for the forwarded SSO token. Defaults to 101; override via HIQ_EDITOR_SITE. */
   site: string;
 }
 

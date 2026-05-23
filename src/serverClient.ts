@@ -61,10 +61,9 @@ async function connect(): Promise<Client> {
     { name: "hiq-editor-gateway", version: VERSION },
     { capabilities: {} },
   );
-  // The APISIX edge routes auth by X-Site: 101 = JWT auth (validates our Bearer
-  // token); the default host maps to 000 = apikey auth, which rejects us with
-  // "api key不存在". Send X-Site:101 + the accessToken cookie, matching what
-  // Cortex Desktop's cortex-jwt connector sends, so the JWT path is taken.
+  // Internal edge auth, matching what Cortex Desktop's connector sends for the
+  // signed-in session: X-Site selects the JWT-auth path for the forwarded SSO
+  // token, plus the accessToken cookie (the sso_token unwrapped from a Cortex JWT).
   const transport = new StreamableHTTPClientTransport(new URL(config.serverUrl), {
     requestInit: {
       headers: {
