@@ -11,7 +11,10 @@
  *                            no `login` tool in this client.
  */
 
-const DEFAULT_SERVER_URL = "https://editor.hiqlcd.com/api/editor-mcp";
+// The editor server is reached through the existing APISIX edge at x.hiqlcd.com
+// (same host the previous remote MCP used). The final sub-path is set by the
+// APISIX route when the TS server deploys; override via HIQ_EDITOR_SERVER_URL.
+const DEFAULT_SERVER_URL = "https://x.hiqlcd.com/editor-mcp";
 
 function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
