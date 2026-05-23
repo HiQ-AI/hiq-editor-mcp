@@ -31,17 +31,35 @@ runs the 2 local tools locally and passes every other call through to the remote
 endpoint, relaying the result content. This eliminates schema duplication and
 reuses the server's existing MCP endpoint.
 
-## Install / run
+## Connecting — two ways
 
-No install needed — run it with `npx`:
+The editor server exposes one Streamable-HTTP MCP endpoint
+(`https://x.hiqlcd.com/mcp/editor`). You can reach it **directly** or **through
+this gateway** — pick based on whether you need local file tools.
+
+### A. Remote HTTP MCP — direct, no install
+
+Any host that supports remote (Streamable HTTP) MCP can connect to the endpoint
+directly. Zero install, but you get only the server's business tools — **not**
+the local file tools (`parse_upr_template` / `export_process`), which need a
+process on your machine.
 
 ```bash
-npx @hiq-ai/hiq-editor-mcp
+# e.g. Claude Code
+claude mcp add --transport http editor https://x.hiqlcd.com/mcp/editor \
+  --header "Authorization: Bearer <your SSO token>" \
+  --header "X-Site: 101"
 ```
 
-### MCP client config
+The edge routes auth by `X-Site`: **101 = JWT auth** (validates your Bearer
+token). `X-Site: 101` is required — the default would otherwise expect an API
+key and reject the request.
 
-Add it to your MCP host's `mcpServers` config (Claude Code, Cortex Desktop, etc.):
+### B. Local stdio gateway — this package
+
+Spawn it over stdio from your MCP host (Cortex Desktop, Claude Code, …). It adds
+the local file tools and handles the edge auth headers (incl. unwrapping a
+Cortex JWT) for you — so the host config only needs the token:
 
 ```jsonc
 {
@@ -50,16 +68,16 @@ Add it to your MCP host's `mcpServers` config (Claude Code, Cortex Desktop, etc.
       "command": "npx",
       "args": ["-y", "@hiq-ai/hiq-editor-mcp"],
       "env": {
-        "HIQ_EDITOR_TOKEN": "<your SSO token>",
-        "HIQ_EDITOR_SERVER_URL": "https://x.hiqlcd.com/mcp/editor"
+        "HIQ_EDITOR_TOKEN": "<your SSO token>"
       }
     }
   }
 }
 ```
 
-`HIQ_EDITOR_SERVER_URL` is the editor server's Streamable-HTTP MCP endpoint. It
-is optional and defaults to `https://x.hiqlcd.com/mcp/editor`.
+`HIQ_EDITOR_SERVER_URL` overrides the endpoint (defaults to
+`https://x.hiqlcd.com/mcp/editor`); `HIQ_EDITOR_SITE` overrides the `X-Site`
+value (defaults to `101`).
 
 ## Authentication
 
@@ -114,18 +132,19 @@ Both local tools require **absolute** file paths.
 
 A generic gateway CLI makes the same tools scriptable from a shell:
 
+The CLI binary is `hiq-editor` (shipped by the `@hiq-ai/hiq-editor-mcp`
+package — select it with `npx -p`):
+
 ```bash
 export HIQ_EDITOR_TOKEN=<your SSO token>
 
 # List the tools the gateway exposes (remote + local).
-npx @hiq-ai/hiq-editor list
+npx -p @hiq-ai/hiq-editor-mcp hiq-editor list
 
 # Invoke any tool by name, passing args as a JSON object.
-npx @hiq-ai/hiq-editor call list_datasources
-npx @hiq-ai/hiq-editor call get_process_detail_tool --args '{"process_id":"12345"}'
-npx @hiq-ai/hiq-editor call parse_upr_template --args '{"file_path":"/abs/path/UPR.xlsx"}'
-
-npx @hiq-ai/hiq-editor version
+npx -p @hiq-ai/hiq-editor-mcp hiq-editor call list_datasources
+npx -p @hiq-ai/hiq-editor-mcp hiq-editor call get_process_detail_tool --args '{"process_id":"12345"}'
+npx -p @hiq-ai/hiq-editor-mcp hiq-editor call parse_upr_template --args '{"file_path":"/abs/path/UPR.xlsx"}'
 ```
 
 `--args` defaults to `{}`. Tool names are the server's native (snake_case) names.
